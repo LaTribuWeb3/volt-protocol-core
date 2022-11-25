@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity 0.8.13;
 
-import {MockERC20} from "./../../../mock/MockERC20.sol";
-import {Core, Vcon, Volt, IERC20, IVolt} from "../../../core/Core.sol";
-import {CoreV2} from "../../../core/CoreV2.sol";
 import {Vm} from "../../../../forge-std/src/Test.sol";
+import {CoreV2} from "../../../core/CoreV2.sol";
+import {MockERC20} from "./../../../mock/MockERC20.sol";
+import {VoltSystemOracle} from "../../../oracle/VoltSystemOracle.sol";
+import {IOraclePassThrough} from "../../../oracle/IOraclePassThrough.sol";
+import {IScalingPriceOracle} from "../../../oracle/IScalingPriceOracle.sol";
+import {TestAddresses} from "./TestAddresses.sol";
+import {Core, Vcon, Volt, IERC20, IVolt} from "../../../core/Core.sol";
 
 struct VoltTestAddresses {
     address userAddress;
@@ -26,27 +30,6 @@ struct VoltAddresses {
     address pcvGuardAddress1; // address(0xf8D0387538E8e03F3B4394dA89f221D7565a28Ee),
     address pcvGuardAddress2; // address(0xd90E9181B20D8D1B5034d9f5737804Da182039F6),
     address executorAddress; // address(0xcBB83206698E8788F85EFbEeeCAd17e53366EBDf) // msig is executor
-}
-
-/// @dev Get a list of addresses
-function getAddresses() pure returns (VoltTestAddresses memory) {
-    VoltTestAddresses memory addresses = VoltTestAddresses({
-        userAddress: address(0x1),
-        secondUserAddress: address(0x2),
-        beneficiaryAddress1: address(0x3),
-        beneficiaryAddress2: address(0x4),
-        governorAddress: address(0x5),
-        genesisGroup: address(0x6),
-        keeperAddress: address(0x7),
-        pcvControllerAddress: address(0x8),
-        minterAddress: address(0x9),
-        burnerAddress: address(0x10),
-        guardianAddress: address(0x11),
-        voltGovernorAddress: address(0x12),
-        voltDeployerAddress: address(0x13)
-    });
-
-    return addresses;
 }
 
 function getVoltAddresses() pure returns (VoltAddresses memory addresses) {
@@ -88,19 +71,21 @@ function getCore() returns (Core) {
         bytes20(uint160(uint256(keccak256("hevm cheat code"))))
     );
     Vm vm = Vm(HEVM_ADDRESS);
-    VoltTestAddresses memory addresses = getAddresses();
 
     // Deploy Core from Governor address
-    vm.startPrank(addresses.governorAddress);
+    vm.startPrank(TestAddresses.governorAddress);
     Core core = new Core();
     core.init();
-    Vcon vcon = new Vcon(addresses.governorAddress, addresses.governorAddress);
+    Vcon vcon = new Vcon(
+        TestAddresses.governorAddress,
+        TestAddresses.governorAddress
+    );
 
     core.setVcon(IERC20(address(vcon)));
-    core.grantMinter(addresses.minterAddress);
-    core.grantBurner(addresses.burnerAddress);
-    core.grantPCVController(addresses.pcvControllerAddress);
-    core.grantGuardian(addresses.guardianAddress);
+    core.grantMinter(TestAddresses.minterAddress);
+    core.grantBurner(TestAddresses.burnerAddress);
+    core.grantPCVController(TestAddresses.pcvControllerAddress);
+    core.grantGuardian(TestAddresses.guardianAddress);
 
     vm.stopPrank();
     return core;
@@ -112,19 +97,56 @@ function getCoreV2() returns (CoreV2) {
         bytes20(uint160(uint256(keccak256("hevm cheat code"))))
     );
     Vm vm = Vm(HEVM_ADDRESS);
-    VoltTestAddresses memory addresses = getAddresses();
 
     MockERC20 volt = new MockERC20();
     // Deploy Core from Governor address
-    vm.startPrank(addresses.governorAddress);
+    vm.startPrank(TestAddresses.governorAddress);
     CoreV2 core = new CoreV2(address(volt));
-    Vcon vcon = new Vcon(addresses.governorAddress, addresses.governorAddress);
+    Vcon vcon = new Vcon(
+        TestAddresses.governorAddress,
+        TestAddresses.governorAddress
+    );
 
     core.setVcon(IERC20(address(vcon)));
-    core.grantMinter(addresses.minterAddress);
-    core.grantPCVController(addresses.pcvControllerAddress);
-    core.grantGuardian(addresses.guardianAddress);
+    core.grantMinter(TestAddresses.minterAddress);
+    core.grantPCVController(TestAddresses.pcvControllerAddress);
+    core.grantGuardian(TestAddresses.guardianAddress);
 
     vm.stopPrank();
     return core;
+}
+
+function getVoltSystemOracle(
+    uint256 _monthlyChangeRateBasisPoints,
+    uint256 _periodStartTime,
+    uint256 _oraclePrice
+) returns (VoltSystemOracle) {
+    VoltSystemOracle oracle = new VoltSystemOracle(
+        _monthlyChangeRateBasisPoints,
+        _periodStartTime,
+        _oraclePrice
+    );
+
+    return oracle;
+}
+
+function getOraclePassThrough(
+    VoltSystemOracle oracle,
+    address
+) pure returns (IOraclePassThrough) {
+    return IOraclePassThrough(address(oracle));
+}
+
+function getLocalOracleSystem()
+    returns (VoltSystemOracle oracle, IOraclePassThrough opt)
+{
+    oracle = getVoltSystemOracle(100, block.timestamp, 1e18);
+    opt = getOraclePassThrough(oracle, TestAddresses.governorAddress);
+}
+
+function getLocalOracleSystem(
+    uint256 startPrice
+) returns (VoltSystemOracle oracle, IOraclePassThrough opt) {
+    oracle = getVoltSystemOracle(100, block.timestamp, startPrice);
+    opt = getOraclePassThrough(oracle, TestAddresses.governorAddress);
 }

@@ -13,6 +13,8 @@ types/contracts
 .eslintcache
 .xml
 yarn.lock
+package-lock.json
 todo
 out/
 docs/
+lcov.info

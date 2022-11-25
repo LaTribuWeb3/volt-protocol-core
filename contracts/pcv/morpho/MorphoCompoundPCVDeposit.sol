@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity =0.8.13;
 
-import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {ILens} from "./ILens.sol";
+import {ICToken} from "./ICompound.sol";
 import {IMorpho} from "./IMorpho.sol";
 import {CoreRefV2} from "../../refs/CoreRefV2.sol";
 import {Constants} from "../../Constants.sol";
-import {IPCVOracle} from "./IPCVOracle.sol";
 import {PCVDeposit} from "../PCVDeposit.sol";
-import {ICompoundOracle, ICToken} from "./ICompound.sol";
 
 /// @notice PCV Deposit for Morpho-Compound V2.
 /// Implements the PCV Deposit interface to deposit and withdraw funds in Morpho
@@ -37,16 +35,9 @@ import {ICompoundOracle, ICToken} from "./ICompound.sol";
 /// and protocol engineers are forced to choose who to round in favor of.
 /// Engineers must round in favor of the protocol to avoid deposits of 0 giving
 /// the user a balance.
-contract MorphoCompoundPCVDeposit is PCVDeposit, ReentrancyGuard {
+contract MorphoCompoundPCVDeposit is PCVDeposit {
     using SafeERC20 for IERC20;
     using SafeCast for *;
-
-    /// ------------------------------------------
-    /// ----------------- Event ------------------
-    /// ------------------------------------------
-
-    /// @notice emitted when the PCV Oracle address is updated
-    event PCVOracleUpdated(address oldOracle, address newOracle);
 
     /// ------------------------------------------
     /// ---------- Immutables/Constant -----------
@@ -79,12 +70,6 @@ contract MorphoCompoundPCVDeposit is PCVDeposit, ReentrancyGuard {
     /// most of the time.
     uint256 public lastRecordedBalance;
 
-    /// @notice reference to the PCV Oracle. Settable by governance
-    /// if set, anytime PCV is updated, delta is sent in to update liquid
-    /// amount of PCV held
-    /// not set in the constructor
-    address public pcvOracle;
-
     /// @param _core reference to the core contract
     /// @param _cToken cToken this deposit references
     /// @param _underlying Token denomination of this deposit
@@ -96,7 +81,7 @@ contract MorphoCompoundPCVDeposit is PCVDeposit, ReentrancyGuard {
         address _underlying,
         address _morpho,
         address _lens
-    ) CoreRefV2(_core) ReentrancyGuard() {
+    ) CoreRefV2(_core) {
         if (_underlying != address(Constants.WETH)) {
             require(
                 ICToken(_cToken).underlying() == _underlying,
@@ -136,7 +121,7 @@ contract MorphoCompoundPCVDeposit is PCVDeposit, ReentrancyGuard {
     /// @notice deposit ERC-20 tokens to Morpho-Compound
     /// non-reentrant to block malicious reentrant state changes
     /// to the lastRecordedBalance variable
-    function deposit() public whenNotPaused nonReentrant {
+    function deposit() public whenNotPaused globalLock(2) {
         /// ------ Check ------
 
         uint256 amount = IERC20(token).balanceOf(address(this));
@@ -169,11 +154,7 @@ contract MorphoCompoundPCVDeposit is PCVDeposit, ReentrancyGuard {
 
         int256 endingRecordedBalance = balance().toInt256();
 
-        if (pcvOracle != address(0)) {
-            IPCVOracle(pcvOracle).updateLiquidBalance(
-                endingRecordedBalance - startingRecordedBalance
-            );
-        }
+        _liquidPcvOracleHook(endingRecordedBalance - startingRecordedBalance);
 
         emit Deposit(msg.sender, amount);
     }
@@ -181,7 +162,7 @@ contract MorphoCompoundPCVDeposit is PCVDeposit, ReentrancyGuard {
     /// @notice claim COMP rewards for supplying to Morpho.
     /// Does not require reentrancy lock as no smart contract state is mutated
     /// in this function.
-    function harvest() external {
+    function harvest() external globalLock(2) {
         address[] memory cTokens = new address[](1);
         cTokens[0] = cToken;
 
@@ -196,21 +177,19 @@ contract MorphoCompoundPCVDeposit is PCVDeposit, ReentrancyGuard {
     /// then writes the current amount of PCV tracked in this contract
     /// to lastRecordedBalance
     /// @return the amount deposited after adding accrued interest or realizing losses
-    function accrue() external nonReentrant whenNotPaused returns (uint256) {
+    function accrue() external globalLock(2) whenNotPaused returns (uint256) {
         int256 startingRecordedBalance = lastRecordedBalance.toInt256();
 
         _recordPNL(); /// update deposit amount and fire harvest event
 
-        int256 endingRecordedBalance = lastRecordedBalance.toInt256();
+        uint256 endingRecordedBalance = lastRecordedBalance;
 
-        if (pcvOracle != address(0)) {
-            /// if any amount of PCV is withdrawn and no gains, delta is negative
-            IPCVOracle(pcvOracle).updateLiquidBalance(
-                endingRecordedBalance - startingRecordedBalance
-            );
-        }
+        /// if any amount of PCV is withdrawn and no gains, delta is negative
+        _liquidPcvOracleHook(
+            endingRecordedBalance.toInt256() - startingRecordedBalance
+        );
 
-        return lastRecordedBalance; /// return updated pcv amount
+        return endingRecordedBalance; /// return updated pcv amount
     }
 
     /// ------------------------------------------
@@ -224,24 +203,21 @@ contract MorphoCompoundPCVDeposit is PCVDeposit, ReentrancyGuard {
     function withdraw(
         address to,
         uint256 amount
-    ) external onlyPCVController nonReentrant {
+    ) external onlyPCVController globalLock(2) {
         int256 startingRecordedBalance = lastRecordedBalance.toInt256();
 
         _withdraw(to, amount, true);
 
         int256 endingRecordedBalance = lastRecordedBalance.toInt256();
-        if (pcvOracle != address(0)) {
-            /// if any amount of PCV is withdrawn and no gains, delta is negative
-            IPCVOracle(pcvOracle).updateLiquidBalance(
-                endingRecordedBalance - startingRecordedBalance
-            );
-        }
+
+        /// if any amount of PCV is withdrawn and no gains, delta is negative
+        _liquidPcvOracleHook(endingRecordedBalance - startingRecordedBalance);
     }
 
     /// @notice withdraw all tokens from Morpho
     /// non-reentrant as state changes and external calls are made
     /// @param to the address PCV will be sent to
-    function withdrawAll(address to) external onlyPCVController nonReentrant {
+    function withdrawAll(address to) external onlyPCVController globalLock(2) {
         int256 startingRecordedBalance = lastRecordedBalance.toInt256();
 
         /// compute profit from interest accrued and emit an event
@@ -252,27 +228,8 @@ contract MorphoCompoundPCVDeposit is PCVDeposit, ReentrancyGuard {
 
         int256 endingRecordedBalance = lastRecordedBalance.toInt256();
 
-        if (pcvOracle != address(0)) {
-            /// all PCV withdrawn, send call in with amount withdrawn negative if any amount is withdrawn
-            IPCVOracle(pcvOracle).updateLiquidBalance(
-                endingRecordedBalance - startingRecordedBalance
-            );
-        }
-    }
-
-    /// @notice set the pcv oracle address
-    /// @param _pcvOracle new pcv oracle to reference
-    function setPCVOracle(address _pcvOracle) external onlyGovernor {
-        address oldOracle = pcvOracle;
-        pcvOracle = _pcvOracle;
-
-        _recordPNL();
-
-        IPCVOracle(pcvOracle).updateLiquidBalance(
-            lastRecordedBalance.toInt256()
-        );
-
-        emit PCVOracleUpdated(oldOracle, _pcvOracle);
+        /// all PCV withdrawn, send call in with amount withdrawn negative if any amount is withdrawn
+        _liquidPcvOracleHook(endingRecordedBalance - startingRecordedBalance);
     }
 
     /// ------------------------------------------

@@ -9,9 +9,8 @@ import {Test} from "../../../../forge-std/src/Test.sol";
 import {ICoreV2} from "../../../core/ICoreV2.sol";
 import {MockMinter} from "../../../mock/MockMinter.sol";
 import {IGRLM, GlobalRateLimitedMinter} from "../../../minter/GlobalRateLimitedMinter.sol";
-import {getCoreV2, getAddresses, getVoltAddresses, VoltAddresses, VoltTestAddresses} from "./../utils/Fixtures.sol";
-
-import "hardhat/console.sol";
+import {TestAddresses as addresses} from "../utils/TestAddresses.sol";
+import {getCoreV2, getVoltAddresses, VoltAddresses} from "./../utils/Fixtures.sol";
 
 /// deployment steps
 /// 1. core v2
@@ -24,7 +23,6 @@ import "hardhat/console.sol";
 contract GlobalRateLimitedMinterUnitTest is Test {
     using SafeCast for *;
 
-    VoltTestAddresses public addresses = getAddresses();
     VoltAddresses public guardianAddresses = getVoltAddresses();
 
     GlobalRateLimitedMinter public grlm;
@@ -57,18 +55,18 @@ contract GlobalRateLimitedMinterUnitTest is Test {
         );
         minter = new MockMinter(coreAddress, address(grlm));
 
-        // deal(address(volt), address(this), 100);
-        console.log("volt balance: ", volt.balanceOf(address(this)));
-
         vm.startPrank(addresses.governorAddress);
 
         core.grantMinter(address(grlm));
+        core.grantLocker(address(grlm));
 
         core.grantRateLimitedMinter(guardianAddresses.pcvGuardAddress1);
         core.grantRateLimitedMinter(guardianAddresses.pcvGuardAddress2);
+        core.grantRateLimitedRedeemer(guardianAddresses.pcvGuardAddress1);
+        core.grantRateLimitedRedeemer(guardianAddresses.pcvGuardAddress2);
 
         core.grantRateLimitedMinter(address(minter));
-        core.grantGlobalLocker(address(minter));
+        core.grantLocker(address(minter));
 
         core.setGlobalRateLimitedMinter(IGRLM(address(grlm)));
 
@@ -96,19 +94,19 @@ contract GlobalRateLimitedMinterUnitTest is Test {
         grlm.mintVolt(address(this), 100);
     }
 
-    function testReplenishNonMinterNonPsmFails() public {
+    function testReplenishNonRedeemerFails() public {
         vm.expectRevert("UNAUTHORIZED");
         grlm.replenishBuffer(100);
     }
 
     function testMintAsMinterFailsWhenNotLocked() public {
-        vm.expectRevert("CoreRef: System not locked");
+        vm.expectRevert("GlobalReentrancyLock: invalid lock level");
         vm.prank(guardianAddresses.pcvGuardAddress1);
         grlm.mintVolt(address(this), 0);
     }
 
     function testReplenishAsMinterFailsWhenNotLocked() public {
-        vm.expectRevert("CoreRef: System not locked");
+        vm.expectRevert("GlobalReentrancyLock: invalid lock level");
         vm.prank(guardianAddresses.pcvGuardAddress1);
         grlm.replenishBuffer(0);
     }
@@ -127,6 +125,9 @@ contract GlobalRateLimitedMinterUnitTest is Test {
         uint80 replenishAmount,
         uint80 depleteAmount
     ) public {
+        vm.prank(addresses.governorAddress);
+        core.grantRateLimitedRedeemer(address(minter));
+
         minter.mint(address(this), depleteAmount);
 
         uint256 startingBuffer = grlm.buffer();
